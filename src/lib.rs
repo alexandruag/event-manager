@@ -52,12 +52,21 @@ pub trait EventSubscriber {
     /// Process `events` triggered in the event manager loop.
     ///
     /// Optionally, the subscriber can use `ops` to update the events it monitors.
-    fn process(&mut self, events: Events, ops: &mut EventOps);
+    fn process(&self, events: Events, ops: &mut EventOps);
 
     /// Initialization called by the [EventManager](struct.EventManager.html) when the subscriber
     /// is registered.
     ///
     /// The subscriber is expected to use `ops` to register the events it wants to monitor.
+    fn init(&self, ops: &mut EventOps);
+}
+
+/// Mut
+pub trait MutEventSubscriber {
+    /// Mut
+    fn process(&mut self, events: Events, ops: &mut EventOps);
+
+    /// Mut
     fn init(&mut self, ops: &mut EventOps);
 }
 

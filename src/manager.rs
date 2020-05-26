@@ -1,6 +1,8 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use vmm_sys_util::epoll::EpollEvent;
@@ -12,6 +14,8 @@ use super::endpoint::{EventManagerChannel, RemoteEndpoint};
 use super::epoll::EpollWrapper;
 use super::subscribers::Subscribers;
 use super::{Errno, Error, EventOps, EventSubscriber, Events, Result, SubscriberId, SubscriberOps};
+use crate::MutEventSubscriber;
+use std::ops::Deref;
 
 /// Allows event subscribers to be registered, connected to the event loop, and later removed.
 pub struct EventManager<T> {
@@ -65,18 +69,60 @@ impl<T: EventSubscriber> SubscriberOps for EventManager<T> {
     }
 }
 
-// TODO: add implementations for other standard wrappers as well.
-impl EventSubscriber for Arc<Mutex<dyn EventSubscriber>> {
+
+// We might want to move all these implementations someplace else.
+
+impl<T: EventSubscriber + ?Sized> MutEventSubscriber for T {
     fn process(&mut self, events: Events, ops: &mut EventOps) {
-        self.lock().unwrap().process(events, ops);
+        EventSubscriber::process(self, events, ops);
     }
 
     fn init(&mut self, ops: &mut EventOps) {
+        EventSubscriber::init(self,ops);
+    }
+}
+
+impl<T: EventSubscriber + ?Sized> EventSubscriber for Arc<T> {
+    fn process(&self, events: Events, ops: &mut EventOps) {
+        self.deref().process(events, ops);
+    }
+
+    fn init(&self, ops: &mut EventOps) {
+        self.deref().init(ops);
+    }
+}
+
+impl<T: EventSubscriber + ?Sized> EventSubscriber for Rc<T> {
+    fn process(&self, events: Events, ops: &mut EventOps) {
+        self.deref().process(events, ops);
+    }
+
+    fn init(&self, ops: &mut EventOps) {
+        self.deref().init(ops);
+    }
+}
+
+impl<T: MutEventSubscriber + ?Sized> EventSubscriber for RefCell<T> {
+    fn process(&self, events: Events, ops: &mut EventOps) {
+        self.borrow_mut().process(events, ops);
+    }
+
+    fn init(&self, ops: &mut EventOps) {
+        self.borrow_mut().init(ops);
+    }
+}
+
+impl<T: MutEventSubscriber + ?Sized> EventSubscriber for Mutex<T> {
+    fn process(&self, events: Events, ops: &mut EventOps) {
+        self.lock().unwrap().process(events, ops);
+    }
+
+    fn init(&self, ops: &mut EventOps) {
         self.lock().unwrap().init(ops);
     }
 }
 
-impl<S: EventSubscriber> EventManager<S> {
+impl<S: MutEventSubscriber> EventManager<S> {
     /// Create a new `EventManger` object.
     pub fn new() -> Result<Self> {
         let manager = EventManager {
@@ -312,7 +358,7 @@ mod tests {
         }
     }
 
-    impl EventSubscriber for DummySubscriber {
+    impl MutEventSubscriber for DummySubscriber {
         fn process(&mut self, events: Events, ops: &mut EventOps) {
             let source = events.fd();
             let event_set = events.event_set();
@@ -343,7 +389,7 @@ mod tests {
     fn test_register() {
         use super::SubscriberOps;
 
-        let mut event_manager = EventManager::<Arc<Mutex<dyn EventSubscriber>>>::new().unwrap();
+        let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber>>>::new().unwrap();
         let dummy_subscriber = Arc::new(Mutex::new(DummySubscriber::new()));
 
         event_manager.add_subscriber(dummy_subscriber.clone());
@@ -368,7 +414,7 @@ mod tests {
     fn test_add_invalid_subscriber() {
         use std::os::unix::io::FromRawFd;
 
-        let mut event_manager = EventManager::<Arc<Mutex<dyn EventSubscriber>>>::new().unwrap();
+        let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber>>>::new().unwrap();
         let subscriber = Arc::new(Mutex::new(DummySubscriber::new()));
 
         event_manager.add_subscriber(subscriber.clone());
@@ -387,7 +433,7 @@ mod tests {
     // Test that unregistering an event while processing another one works.
     #[test]
     fn test_unregister() {
-        let mut event_manager = EventManager::<Arc<Mutex<dyn EventSubscriber>>>::new().unwrap();
+        let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber>>>::new().unwrap();
         let dummy_subscriber = Arc::new(Mutex::new(DummySubscriber::new()));
 
         event_manager.add_subscriber(dummy_subscriber.clone());
@@ -407,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_modify() {
-        let mut event_manager = EventManager::<Arc<Mutex<dyn EventSubscriber>>>::new().unwrap();
+        let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber>>>::new().unwrap();
         let dummy_subscriber = Arc::new(Mutex::new(DummySubscriber::new()));
 
         event_manager.add_subscriber(dummy_subscriber.clone());
@@ -436,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_remove_subscriber() {
-        let mut event_manager = EventManager::<Arc<Mutex<dyn EventSubscriber>>>::new().unwrap();
+        let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber>>>::new().unwrap();
         let dummy_subscriber = Arc::new(Mutex::new(DummySubscriber::new()));
 
         let subscriber_id = event_manager.add_subscriber(dummy_subscriber.clone());
