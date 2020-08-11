@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
+use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::result;
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,9 @@ pub enum Error {
     // TODO: should we allow fds to be registered multiple times?
     /// The fd is already associated with an existing subscriber.
     FdAlreadyRegistered,
+    /// One or more events could not be dispatched because the associated fd does not appear
+    /// to be registered with the event manager.
+    FdsNotRegistered(Vec<RawFd>),
     /// The Subscriber ID does not exist or is no longer associated with a Subscriber.
     InvalidId,
 }
@@ -74,6 +78,10 @@ impl std::fmt::Display for Error {
                 f,
                 "event_manager: file descriptor has already been registered"
             ),
+            Error::FdsNotRegistered(_) => write!(
+                f,
+                "event_manager: one or more fds were not associated with any subscriber"
+            ),
             Error::InvalidId => write!(f, "event_manager: invalid subscriber Id"),
         }
     }
@@ -90,6 +98,7 @@ impl std::error::Error for Error {
             Error::EventFd(e) => Some(e),
             Error::Epoll(e) => Some(e),
             Error::FdAlreadyRegistered => None,
+            Error::FdsNotRegistered(_) => None,
             Error::InvalidId => None,
         }
     }

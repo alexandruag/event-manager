@@ -114,15 +114,24 @@ impl<S: MutEventSubscriber> EventManager<S> {
             Err(e) if e.raw_os_error() == Some(libc::EINTR) => return Ok(0),
             Err(e) => return Err(Error::Epoll(Errno::from(e))),
         };
-        self.dispatch_events(event_count);
+
+        self.dispatch_events(event_count)?;
 
         Ok(event_count)
     }
 
-    fn dispatch_events(&mut self, event_count: usize) {
+    fn dispatch_events(&mut self, event_count: usize) -> Result<()> {
         // Used to record whether there's an endpoint event that needs to be handled.
         #[cfg(feature = "remote_endpoint")]
         let mut endpoint_event = None;
+
+        // We use this to collect any fd numbers that are not associated with a registered
+        // event, and then return an error at the end of the method. We don't return an error
+        // immediately upon identifying the first unregistered fd because we still want to
+        // process the remaining events in the loop below (which is convenient, for example,
+        // when the events are edge triggered and the caller can recover from or simply
+        // discard this type of error).
+        let mut missing_fds = Vec::new();
 
         // Use the temporary, pre-allocated buffer to check ready events.
         for ev_index in 0..event_count {
@@ -138,20 +147,28 @@ impl<S: MutEventSubscriber> EventManager<S> {
             } else {
                 #[cfg(feature = "remote_endpoint")]
                 {
+                    // If we got here, there's a chance the event was triggered by the remote
+                    // endpoint fd. Only check for incoming endpoint events right now, and defer
+                    // actually handling them until all subscriber events have been handled first.
+                    // This prevents subscribers whose events are about to be handled from being
+                    // removed by an endpoint request (or other similar situations).
                     if fd == self.channel.fd() {
                         endpoint_event = Some(event);
                         continue;
                     }
                 }
-
-                // This error condition can happen when the fd associated with a subscriber was
-                // closed, and the subscriber did not handle the RHUP.
-                panic!("Received event on fd from subscriber that does not exist");
+                missing_fds.push(fd);
             }
         }
 
+        if !missing_fds.is_empty() {
+            return Err(Error::FdsNotRegistered(missing_fds));
+        }
+
         #[cfg(feature = "remote_endpoint")]
-        self.dispatch_endpoint_event(endpoint_event);
+        self.dispatch_endpoint_event(endpoint_event)?;
+
+        Ok(())
     }
 }
 
@@ -164,20 +181,24 @@ impl<S: MutEventSubscriber> EventManager<S> {
         self.channel.remote_endpoint()
     }
 
-    fn dispatch_endpoint_event(&mut self, endpoint_event: Option<EpollEvent>) {
+    fn dispatch_endpoint_event(&mut self, endpoint_event: Option<EpollEvent>) -> Result<()> {
         if let Some(event) = endpoint_event {
             if event.event_set() != EventSet::IN {
                 // This situation is virtually impossible to occur. If it does we have
                 // a programming error in our code.
                 unreachable!();
             }
-            self.handle_endpoint_calls();
+            self.handle_endpoint_calls()?;
         }
+        Ok(())
     }
 
-    fn handle_endpoint_calls(&mut self) {
-        // Clear the inner event_fd. We don't do anything about an error here at this point.
-        let _ = self.channel.event_fd.read();
+    fn handle_endpoint_calls(&mut self) -> Result<()> {
+        // Clear the inner event_fd.
+        self.channel
+            .event_fd
+            .read()
+            .map_err(|e| Error::EventFd(e.into()))?;
 
         // Process messages. We consider only `Empty` errors can appear here; we don't check
         // for `Disconnected` errors because we keep at least one clone of `channel.sender` alive
@@ -185,9 +206,10 @@ impl<S: MutEventSubscriber> EventManager<S> {
         while let Ok(msg) = self.channel.receiver.try_recv() {
             match msg.sender {
                 Some(sender) => {
-                    // We call the inner closure and attempt to send back the result, but can't really do
-                    // anything in case of error here.
-                    let _ = sender.send((msg.fnbox)(self));
+                    // We call the inner closure and attempt to send back the result.
+                    sender
+                        .send((msg.fnbox)(self))
+                        .map_err(|_| Error::ChannelSend)?;
                 }
                 None => {
                     // Just call the function and discard the result.
@@ -195,6 +217,7 @@ impl<S: MutEventSubscriber> EventManager<S> {
                 }
             }
         }
+        Ok(())
     }
 }
 
